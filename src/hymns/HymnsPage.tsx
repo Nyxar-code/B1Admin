@@ -1,6 +1,6 @@
 import React from "react";
 import { ApiHelper, Loading, PageHeader, Permissions, UserHelper } from "@churchapps/apphelper";
-import type { HymnInterface, HymnVerseInterface } from "@churchapps/helpers";
+import type { HymnInterface, HymnVerseInterface } from "./types";
 import { Add as AddIcon, MenuBook as HymnsIcon, Archive as ArchiveIcon, Edit as EditIcon, Publish as PublishIcon } from "@mui/icons-material";
 import { Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, FormControl, IconButton, InputLabel, MenuItem, Select, Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography } from "@mui/material";
 import { useRequirePermission } from "../hooks";
@@ -45,7 +45,7 @@ const HymnEdit = ({ hymn, onClose, onSaved }: { hymn: HymnInterface; onClose: ()
     }
   };
   const field = (label: string, key: keyof HymnInterface) => <TextField label={label} value={(value[key] as string | number | undefined) ?? ""} onChange={(event) => update(key, key === "number" ? Number(event.target.value) : event.target.value)} type={key === "number" ? "number" : "text"} inputProps={key === "number" ? { min: 1, step: 1 } : undefined} required={key === "number" || key === "title"} fullWidth />;
-  return <Dialog open fullWidth maxWidth="md" onClose={onClose}>
+  return <Dialog open fullWidth maxWidth="md" onClose={saving ? undefined : onClose}>
     <DialogTitle>{value.id ? "Edit hymn" : "New hymn"}</DialogTitle>
     <DialogContent>
       <Stack spacing={2} sx={{ pt: 1 }}>
@@ -69,35 +69,61 @@ const HymnEdit = ({ hymn, onClose, onSaved }: { hymn: HymnInterface; onClose: ()
         <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>{field("License", "license")}{field("Attribution", "attribution")}</Stack>
       </Stack>
     </DialogContent>
-    <DialogActions><Button onClick={onClose}>Cancel</Button><Button variant="contained" onClick={save} disabled={saving}>{saving ? "Saving..." : "Save"}</Button></DialogActions>
+    <DialogActions><Button onClick={onClose} disabled={saving}>Cancel</Button><Button variant="contained" onClick={save} disabled={saving}>{saving ? "Saving..." : "Save"}</Button></DialogActions>
   </Dialog>;
 };
 
 export const HymnsPage = () => {
   const denied = useRequirePermission(Permissions.contentApi.content.edit);
+  const canEdit = !denied;
   const [hymns, setHymns] = React.useState<HymnInterface[]>([]);
   const [editing, setEditing] = React.useState<HymnInterface | null>(null);
+  const [pending, setPending] = React.useState(false);
   const [search, setSearch] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const churchId = UserHelper.currentUserChurch?.church?.id;
   const load = React.useCallback(async () => {
-    if (!churchId) return;
+    if (!canEdit || !churchId) return;
     setLoading(true);
-    try { setHymns(await ApiHelper.get("/hymns", "ContentApi")); } catch { setError("The hymns could not be loaded."); } finally { setLoading(false); }
-  }, [churchId]);
+    setError("");
+    try {
+      const items = await ApiHelper.get("/hymns", "ContentApi");
+      if (!Array.isArray(items)) throw new Error("Invalid hymn list response");
+      setHymns(items);
+    } catch {
+      setHymns([]);
+      setError("The hymns could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  }, [churchId, canEdit]);
   React.useEffect(() => { load(); }, [load]);
   if (denied) return denied;
-  if (loading) return <Loading />;
+  if (!churchId || loading) return <Loading />;
   const filtered = hymns.filter((hymn) => `${hymn.number} ${hymn.title} ${hymn.category}`.toLowerCase().includes(search.toLowerCase()));
-  const setPublished = async (hymn: HymnInterface) => { await ApiHelper.post(`/hymns/${hymn.id}/${hymn.published ? "unpublish" : "publish"}`, {}, "ContentApi"); load(); };
-  const archive = async (hymn: HymnInterface) => { await ApiHelper.delete(`/hymns/${hymn.id}`, "ContentApi"); load(); };
+  const runAction = async (action: () => Promise<unknown>) => {
+    setPending(true);
+    setError("");
+    try {
+      await action();
+      await load();
+    } catch {
+      setError("The hymn status could not be changed. Try again.");
+    } finally {
+      setPending(false);
+    }
+  };
+  const setPublished = (hymn: HymnInterface) => runAction(() => ApiHelper.post(
+    `/hymns/${hymn.id}/${hymn.published ? "unpublish" : "publish"}`, {}, "ContentApi"
+  ));
+  const archive = (hymn: HymnInterface) => runAction(() => ApiHelper.delete(`/hymns/${hymn.id}`, "ContentApi"));
   return <>
     <PageHeader icon={<HymnsIcon />} title="Hymns" subtitle="Manage your church's hymn collection"><Button variant="contained" startIcon={<AddIcon />} onClick={() => setEditing(emptyHymn())}>Add hymn</Button></PageHeader>
     <Box sx={{ p: 3 }}>
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
       <TextField label="Search hymns" value={search} onChange={(event) => setSearch(event.target.value)} sx={{ mb: 2, minWidth: 300 }} />
-      <Table><TableHead><TableRow><TableCell>Number</TableCell><TableCell>Title</TableCell><TableCell>Language</TableCell><TableCell>Category</TableCell><TableCell>Status</TableCell><TableCell align="right">Actions</TableCell></TableRow></TableHead><TableBody>{filtered.map((hymn) => <TableRow key={hymn.id}><TableCell>{hymn.number}</TableCell><TableCell>{hymn.title}</TableCell><TableCell>{hymn.language}</TableCell><TableCell>{hymn.category}</TableCell><TableCell>{hymn.archived ? "Archived" : hymn.published ? "Published" : "Draft"}</TableCell><TableCell align="right"><IconButton aria-label="Edit hymn" onClick={() => setEditing(hymn)}><EditIcon /></IconButton><IconButton aria-label={hymn.published ? "Unpublish hymn" : "Publish hymn"} onClick={() => setPublished(hymn)}><PublishIcon /></IconButton><IconButton aria-label="Archive hymn" onClick={() => archive(hymn)}><ArchiveIcon /></IconButton></TableCell></TableRow>)}</TableBody></Table>
+      <Table><TableHead><TableRow><TableCell>Number</TableCell><TableCell>Title</TableCell><TableCell>Language</TableCell><TableCell>Category</TableCell><TableCell>Status</TableCell><TableCell align="right">Actions</TableCell></TableRow></TableHead><TableBody>{filtered.map((hymn) => <TableRow key={hymn.id}><TableCell>{hymn.number}</TableCell><TableCell>{hymn.title}</TableCell><TableCell>{hymn.language}</TableCell><TableCell>{hymn.category}</TableCell><TableCell>{hymn.archived ? "Archived" : hymn.published ? "Published" : "Draft"}</TableCell><TableCell align="right"><IconButton disabled={pending || hymn.archived} aria-label="Edit hymn" onClick={() => setEditing(hymn)}><EditIcon /></IconButton><IconButton disabled={pending || hymn.archived} aria-label={hymn.published ? "Unpublish hymn" : "Publish hymn"} onClick={() => setPublished(hymn)}><PublishIcon /></IconButton><IconButton disabled={pending || hymn.archived} aria-label="Archive hymn" onClick={() => archive(hymn)}><ArchiveIcon /></IconButton></TableCell></TableRow>)}</TableBody></Table>
       {!filtered.length && <Typography sx={{ p: 4 }} color="text.secondary">No hymns found.</Typography>}
     </Box>
     {editing && <HymnEdit hymn={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
